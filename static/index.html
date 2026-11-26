@@ -38,7 +38,7 @@
 
   /* 画面区 */
   #stage { flex:1; position:relative; display:flex; align-items:center; justify-content:center;
-           overflow:hidden; background:#0a0a0c; }
+           overflow:hidden; background:#0a0a0c; min-height:120px; }
   #screen { max-width:100%; max-height:100%; object-fit:contain; touch-action:none; }
   #hint { position:absolute; text-align:center; padding:24px; color:#888; line-height:1.8; }
   #hint .big { font-size:42px; margin-bottom:10px; }
@@ -59,9 +59,24 @@
   #tools { flex:none; display:flex; gap:8px; padding:8px 10px calc(8px + env(safe-area-inset-bottom));
            background:#141517; }
   #tools button { flex:1; padding:12px 4px; font-size:14px; }
-  #kb { flex:none; display:none; gap:8px; padding:10px; background:#222; }
-  #kb input { flex:1; }
-  #kb button { flex:none; }
+  /* 常用按键条（返回/Esc/方向键等） */
+  #keybar { flex:none; display:flex; gap:6px; padding:6px 10px; background:#202126;
+            border-top:1px solid #2a2a2e; overflow-x:auto; scrollbar-width:none; }
+  #keybar::-webkit-scrollbar { display:none; }
+  #keybar button { flex:0 0 auto; min-width:52px; padding:10px 10px; font-size:13px; font-weight:600; }
+  #keybar button:active { background:#3b3b42; }
+
+  /* 网页键盘 */
+  #kb { flex:none; display:none; flex-direction:column; gap:6px; padding:8px 10px; background:#1c1d20;
+        border-top:1px solid #2a2a2e; max-height:56vh; overflow-y:auto; }
+  #kb .kbtop { display:flex; gap:6px; }
+  #kb .kbtop input { flex:1; min-width:0; }
+  #kb .kbtop button { flex:none; }
+  #kb-keys { display:flex; flex-direction:column; gap:6px; }
+  #kb-keys .kr { display:flex; gap:6px; }
+  #kb-keys .k { flex:1 1 0; min-width:0; padding:13px 0; font-size:15px; text-align:center; }
+  #kb-keys .k.on { background:#2563eb; border-color:#2563eb; color:#fff; }
+  #kb .tip { font-size:11px; color:#8b9096; text-align:center; }
 
   /* 自定义面板（覆盖式，半屏） */
   #editor { position:fixed; inset:0; background:rgba(0,0,0,.6); display:none;
@@ -112,6 +127,29 @@
 
 <div id="btnbar"><!-- 自定义快捷键，由 /api/instances 动态生成 --></div>
 
+<div id="keybar">
+  <button data-k="AndroidBack">返回</button>
+  <button data-k="Escape">Esc</button>
+  <button data-k="Tab">Tab</button>
+  <button data-k="Enter">⏎</button>
+  <button data-k="Backspace">⌫</button>
+  <button data-k="AndroidHome">Home</button>
+  <button data-k="AndroidAppSwitch">多任务</button>
+  <button data-k="ArrowLeft">←</button>
+  <button data-k="ArrowUp">↑</button>
+  <button data-k="ArrowDown">↓</button>
+  <button data-k="ArrowRight">→</button>
+</div>
+
+<div id="kb">
+  <div class="kbtop">
+    <input id="text" placeholder="中文/长文本：输入后点发送">
+    <button id="send">发送</button>
+  </div>
+  <div id="kb-keys"></div>
+  <div class="tip">Shift / Ctrl / Alt 点一次为按下，按完一个键自动弹起</div>
+</div>
+
 <div id="tools">
   <button id="btn-kb">⌨ 键盘</button>
   <button id="btn-edit">⚙ 自定义</button>
@@ -138,11 +176,6 @@
       <button id="ed-save">保存到被控端</button>
     </div>
   </div>
-</div>
-
-<div id="kb">
-  <input id="text" placeholder="输入文字（含中文）后点发送">
-  <button id="send">发送</button>
 </div>
 
 <script>
@@ -326,6 +359,96 @@ function disconnect(){
 
 function send(obj){ if (connected && ws && ws.readyState===1) ws.send(JSON.stringify(obj)); }
 
+// ---- 网页键盘：直接发真实键码，等价于外接键盘 ----
+// 为什么不用安卓软键盘：MuMu 的输入法窗口挂在 display 0（frame 高度还是 0），
+// 我们的 App 在 display 2，所以软键盘永远弹不出来。这里自己画一套。
+const KB_KEYS = { shift:false, ctrl:false, alt:false };
+const KB_ROWS = [
+  [['1','Digit1'],['2','Digit2'],['3','Digit3'],['4','Digit4'],['5','Digit5'],
+   ['6','Digit6'],['7','Digit7'],['8','Digit8'],['9','Digit9'],['0','Digit0']],
+  [['q','KeyQ'],['w','KeyW'],['e','KeyE'],['r','KeyR'],['t','KeyT'],['y','KeyY'],
+   ['u','KeyU'],['i','KeyI'],['o','KeyO'],['p','KeyP']],
+  [['a','KeyA'],['s','KeyS'],['d','KeyD'],['f','KeyF'],['g','KeyG'],['h','KeyH'],
+   ['j','KeyJ'],['k','KeyK'],['l','KeyL']],
+  [['⇧','SHIFT',1.3],['z','KeyZ'],['x','KeyX'],['c','KeyC'],['v','KeyV'],['b','KeyB'],
+   ['n','KeyN'],['m','KeyM'],['⌫','Backspace',1.3]],
+  [['Ctrl','CTRL',1.2],['Alt','ALT',1.2],['空格','Space',3],['⏎','Enter',1.3],['Esc','Escape',1.2]],
+];
+
+function buildKeyboard(){
+  const box=$('kb-keys');
+  if (box.childElementCount) return;          // 只建一次
+  KB_ROWS.forEach(row=>{
+    const r=document.createElement('div'); r.className='kr';
+    row.forEach(([label,code,grow])=>{
+      const b=document.createElement('button');
+      b.className='k'; b.textContent=label; b.dataset.code=code;
+      if (grow) b.style.flexGrow=String(grow);
+      b.onclick=()=>pressKey(b, code);
+      r.appendChild(b);
+    });
+    box.appendChild(r);
+  });
+}
+
+function resetMods(){
+  KB_KEYS.shift=KB_KEYS.ctrl=KB_KEYS.alt=false;
+  document.querySelectorAll('#kb-keys .k.on').forEach(el=>el.classList.remove('on'));
+}
+
+function pressKey(btn, code){
+  if (code==='SHIFT'||code==='CTRL'||code==='ALT'){
+    const on = !KB_KEYS[code.toLowerCase()];
+    KB_KEYS[code.toLowerCase()] = on;
+    btn.classList.toggle('on', on);
+    return;
+  }
+  if (!connected){ setStatus('还没连接','s-err'); return; }
+  let key='';
+  if (code.startsWith('Key')){
+    key = KB_KEYS.shift ? code.slice(3) : code.slice(3).toLowerCase();
+  } else if (code.startsWith('Digit')){
+    key = code.slice(5);
+  } else if (code==='Space'){
+    key = ' ';
+  }
+  send({type:'keycode', code:code, key:key,
+        ctrl:KB_KEYS.ctrl, shift:KB_KEYS.shift, alt:KB_KEYS.alt, meta:false});
+  resetMods();   // 修饰键按一次就弹起
+}
+
+// 常用按键条（返回/Esc/Tab/方向键…）
+document.querySelectorAll('#keybar button').forEach(b=>{
+  b.onclick=()=>{
+    if (!connected){ setStatus('还没连接','s-err'); return; }
+    send({type:'keycode', code:b.dataset.k, key:'',
+          ctrl:false, shift:false, alt:false, meta:false});
+  };
+});
+
+// ---- 电脑键盘映射：连上后用物理键盘直接操作被控端 ----
+// 只让浏览器自己处理这些键，避免把 F5 刷新 / Ctrl+W 关页 抢走
+function browserOwnsKey(e){
+  if (e.ctrlKey || e.metaKey) {
+    return ['KeyR','KeyW','KeyT','KeyN','KeyI','KeyJ','KeyL','KeyP','KeyS',
+            'KeyD','KeyF','KeyG','KeyH','KeyO','KeyU','KeyA'].includes(e.code)
+            && !e.shiftKey;   // Ctrl+A 让给被控端（全选很常用）
+  }
+  return e.code==='F5' || e.code==='F11' || e.code==='F12';
+}
+
+document.addEventListener('keydown', e=>{
+  if (!connected || !e.code) return;
+  const el=e.target||{};
+  const tag=(el.tagName||'').toLowerCase();
+  // 在输入框里打字时不劫持（口令框、文字发送框）
+  if (tag==='input' || tag==='textarea' || tag==='select' || el.isContentEditable) return;
+  if (browserOwnsKey(e)) return;
+  send({type:'keycode', code:e.code, key:e.key,
+        ctrl:e.ctrlKey, shift:e.shiftKey, alt:e.altKey, meta:e.metaKey});
+  e.preventDefault();
+}, false);
+
 // 坐标换算：画面显示区域 -> 归一化 0-1000
 function norm(clientX, clientY){
   const r=screen.getBoundingClientRect();
@@ -363,10 +486,24 @@ screen.addEventListener('mousemove',e=>{
 });
 screen.addEventListener('mouseup',()=>{ if(startPt&&!moved) send({type:'tap',x:startPt[0],y:startPt[1]}); mdown=false; });
 
+// 鼠标滚轮 -> 远端滚动（手机端没有滚轮，但也兼容触控板）
+screen.addEventListener('wheel', e=>{
+  if(!connected) return;
+  e.preventDefault();
+  const dir = e.deltaY > 0 ? 1 : -1;          // 向下滚 = 内容上移 = 手指往上滑
+  const span = Math.min(260, Math.max(80, Math.abs(e.deltaY) * 1.2));
+  send({type:'swipe', x1:500, y1:500 + dir*span/2, x2:500, y2:500 - dir*span/2, duration:130});
+}, {passive:false});
+
 $('connect').onclick=connect;
 $('btn-reconnect').onclick=connect;
 $('btn-disconn').onclick=disconnect;
-$('btn-kb').onclick=()=>{ const k=$('kb'); k.style.display=k.style.display==='none'?'flex':'none'; };
+$('btn-kb').onclick=()=>{
+  const k=$('kb');
+  const show = k.style.display==='none' || !k.style.display;
+  k.style.display = show ? 'flex' : 'none';
+  if (show) buildKeyboard();
+};
 $('btn-edit').onclick=openEditor;
 $('ed-close').onclick=()=>$('editor').classList.remove('show');
 $('ed-add').onclick=()=>addEditRow('','');

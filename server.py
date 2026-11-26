@@ -14,6 +14,11 @@ import capture
 import config
 import input_ctl
 
+try:                    # Windows 专有，非 Windows 环境下降级
+    import win32_input
+except Exception:
+    win32_input = None
+
 app = FastAPI(title="MuMu Remote")
 BASE = os.path.dirname(os.path.abspath(__file__))
 
@@ -189,9 +194,17 @@ async def control(ws: WebSocket, port: str):
             t = msg.get("type")
             try:
                 if is_win32:
-                    # win32 后端暂时只读预览；键鼠映射在 win32_input 里做，随后接上
-                    if t in ("tap", "swipe", "text", "key", "action"):
-                        pass
+                    # win32 后端：键盘已接（PostMessage），鼠标待做
+                    if t == "keycode":
+                        target = TARGET_MAP.get(port) or {}
+                        hwnd = int(target.get("hwnd") or 0)
+                        ok = bool(win32_input and win32_input.send_key(
+                            hwnd, msg.get("code", ""),
+                            ctrl=bool(msg.get("ctrl")), shift=bool(msg.get("shift")),
+                            alt=bool(msg.get("alt")), meta=bool(msg.get("meta")),
+                        ))
+                        if not ok:
+                            await ws.send_json({"type": "error", "msg": f"未识别的按键：{msg.get('code')}"})
                     continue
                 if t == "tap":
                     input_ctl.tap(port, msg["x"], msg["y"])
@@ -202,10 +215,23 @@ async def control(ws: WebSocket, port: str):
                     input_ctl.text(port, msg["value"])
                 elif t == "key":
                     input_ctl.key(port, msg["code"])
+                elif t == "keycode":
+                    ok = input_ctl.key_code(
+                        port, msg.get("code", ""),
+                        ctrl=bool(msg.get("ctrl")), shift=bool(msg.get("shift")),
+                        alt=bool(msg.get("alt")), meta=bool(msg.get("meta")),
+                    )
+                    if not ok:
+                        await ws.send_json({"type": "error", "msg": f"未识别的按键：{msg.get('code')}"})
                 elif t == "action":
                     actions = getattr(config, "BUTTON_ACTIONS", {}).get(msg["name"])
                     if actions:
                         input_ctl.run_actions(port, actions)
+                elif t == "ime":
+                    # 注意：MuMu 多 display 下输入法窗口在 display 0，这个开关通常看不到效果
+                    ok = input_ctl.set_soft_keyboard(port, bool(msg.get("enable", True)))
+                    await ws.send_json({"type": "ime", "ok": ok,
+                                        "enable": bool(msg.get("enable", True))})
             except Exception as e:
                 await ws.send_json({"type": "error", "msg": str(e)})
     except WebSocketDisconnect:

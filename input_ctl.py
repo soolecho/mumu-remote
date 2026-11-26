@@ -82,6 +82,92 @@ def shell(port: str, command: str):
     _adb(port, "shell", command)
 
 
+def set_soft_keyboard(port: str, enable: bool = True) -> bool:
+    """让安卓软键盘在"接了实体键盘"的情况下也弹出来。
+
+    背景：MuMu 把 adb 注入当成实体键盘，系统就自动隐藏了软键盘。
+    把 show_ime_with_hard_keyboard 设成 1 后，点画面里的输入框就会弹出手机键盘，
+    手机上点键盘 = 点画面坐标，照样走 ADB，输入法联想/中文都能用。
+    """
+    val = "1" if enable else "0"
+    r = _adb(port, "shell", "settings", "put", "secure",
+             "show_ime_with_hard_keyboard", val)
+    return "Error" not in r and "Exception" not in r
+
+
+# ---------- 电脑键盘映射 ----------
+# 浏览器 KeyboardEvent.code -> Android KeyEvent 键码。
+# 用 e.code（物理键位，与输入法/布局无关），Shift 只是修饰，所以 Shift+1 能正确得到 "!"。
+MOD_SHIFT, MOD_ALT, MOD_CTRL, MOD_META = 59, 57, 113, 117
+
+BROWSER_KEY_MAP = {
+    # 字母
+    "KeyA": 29, "KeyB": 30, "KeyC": 31, "KeyD": 32, "KeyE": 33, "KeyF": 34,
+    "KeyG": 35, "KeyH": 36, "KeyI": 37, "KeyJ": 38, "KeyK": 39, "KeyL": 40,
+    "KeyM": 41, "KeyN": 42, "KeyO": 43, "KeyP": 44, "KeyQ": 45, "KeyR": 46,
+    "KeyS": 47, "KeyT": 48, "KeyU": 49, "KeyV": 50, "KeyW": 51, "KeyX": 52,
+    "KeyY": 53, "KeyZ": 54,
+    # 数字（主键盘）
+    "Digit0": 7, "Digit1": 8, "Digit2": 9, "Digit3": 10, "Digit4": 11,
+    "Digit5": 12, "Digit6": 13, "Digit7": 14, "Digit8": 15, "Digit9": 16,
+    # 符号
+    "Minus": 69, "Equal": 70, "BracketLeft": 71, "BracketRight": 72,
+    "Backslash": 73, "Semicolon": 74, "Quote": 75, "Backquote": 68,
+    "Slash": 76, "Comma": 55, "Period": 56,
+    # 编辑/导航
+    "Escape": 111, "Tab": 61, "Enter": 66, "NumpadEnter": 66, "Space": 62,
+    "Backspace": 67, "Delete": 112, "Insert": 124,
+    "ArrowUp": 19, "ArrowDown": 20, "ArrowLeft": 21, "ArrowRight": 22,
+    "Home": 122, "End": 123, "PageUp": 92, "PageDown": 93,
+    # 功能键
+    "F1": 131, "F2": 132, "F3": 133, "F4": 134, "F5": 135, "F6": 136,
+    "F7": 137, "F8": 138, "F9": 139, "F10": 140, "F11": 141, "F12": 142,
+    # 系统键
+    "CapsLock": 115, "PrintScreen": 120, "ScrollLock": 116, "Pause": 121,
+    # 小键盘
+    "Numpad0": 7, "Numpad1": 8, "Numpad2": 9, "Numpad3": 10, "Numpad4": 11,
+    "Numpad5": 12, "Numpad6": 13, "Numpad7": 14, "Numpad8": 15, "Numpad9": 16,
+    "NumpadAdd": 81, "NumpadSubtract": 69, "NumpadMultiply": 17,
+    "NumpadDivide": 76, "NumpadDecimal": 56,
+    # 安卓专用（界面上配置的按钮也可以用名字）
+    "AndroidBack": 4, "AndroidHome": 3, "AndroidMenu": 82,
+    "AndroidAppSwitch": 187, "AndroidPower": 26,
+    "VolumeUp": 24, "VolumeDown": 25, "Mute": 164,
+    "MediaPlayPause": 85, "MediaNext": 87, "MediaPrevious": 88,
+}
+
+
+def key_code(port: str, code: str, ctrl: bool = False, shift: bool = False,
+             alt: bool = False, meta: bool = False):
+    """按浏览器键位码发送按键；带修饰键时用 keycombination（Android 14+）。
+
+    `input keycombination` 的首个键码是修饰键，且顺序有意义，所以修饰键放前面。
+    """
+    kc = BROWSER_KEY_MAP.get(str(code))
+    if kc is None:
+        # 也接受纯数字键码，方便前端/脚本直接传
+        try:
+            kc = int(code)
+        except (TypeError, ValueError):
+            return False
+    mods = []
+    if ctrl:
+        mods.append(MOD_CTRL)
+    if alt:
+        mods.append(MOD_ALT)
+    if meta:
+        mods.append(MOD_META)
+    if shift:
+        mods.append(MOD_SHIFT)
+    disp = str(_display_id(port))
+    if mods:
+        _adb(port, "shell", "input", "-d", disp, "keycombination",
+             *[str(x) for x in mods + [kc]])
+    else:
+        _input(port, "keyevent", str(kc))
+    return True
+
+
 def run_actions(port: str, actions):
     """执行一串自定义动作。每一步是字符串，语法：
 
