@@ -46,12 +46,43 @@
   #hint .sub { font-size:13px; }
   #hint.err .lead { color:#ff9b9b; }
 
+  /* 自定义快捷键行：横向滚动，按钮保持可读宽度，不会被挤成细条 */
+  #btnbar { flex:none; display:flex; gap:8px; padding:8px 10px; background:#191a1d;
+            border-top:1px solid #2a2a2e; overflow-x:auto; overflow-y:hidden;
+            -webkit-overflow-scrolling:touch; scrollbar-width:none; }
+  #btnbar::-webkit-scrollbar { display:none; }
+  #btnbar button { flex:0 0 auto; min-width:76px; padding:12px 14px; font-size:14px; font-weight:600; }
+  #btnbar button:active { background:#3b3b42; }
+  #btnbar:empty { display:none; }
+
   /* 底部工具条 */
-  #tools { flex:none; display:flex; gap:8px; padding:10px; background:#191a1d; border-top:1px solid #2a2a2e; }
-  #tools button { flex:1; padding:12px 4px; }
+  #tools { flex:none; display:flex; gap:8px; padding:8px 10px calc(8px + env(safe-area-inset-bottom));
+           background:#141517; }
+  #tools button { flex:1; padding:12px 4px; font-size:14px; }
   #kb { flex:none; display:none; gap:8px; padding:10px; background:#222; }
   #kb input { flex:1; }
   #kb button { flex:none; }
+
+  /* 自定义面板（覆盖式，半屏） */
+  #editor { position:fixed; inset:0; background:rgba(0,0,0,.6); display:none;
+            align-items:flex-end; z-index:50; }
+  #editor.show { display:flex; }
+  #editor .panel { width:100%; max-height:82vh; background:#17181b; border-radius:14px 14px 0 0;
+                   border-top:1px solid #34343a; display:flex; flex-direction:column; }
+  #editor .head { display:flex; align-items:center; padding:12px 14px; border-bottom:1px solid #2a2a2e;
+                  font-size:16px; font-weight:700; }
+  #editor .head .spacer { flex:1; }
+  #editor .head button { padding:6px 12px; }
+  #editor .tip { padding:10px 14px; font-size:12px; color:#9aa0a6; line-height:1.7; }
+  #editor .tip code { background:#26272b; padding:1px 4px; border-radius:4px; color:#8ecdf7; }
+  #ed-rows { overflow-y:auto; padding:0 14px; }
+  #ed-rows .r { display:flex; gap:6px; align-items:center; margin-bottom:8px; }
+  #ed-rows .r input.n { width:92px; flex:none; }
+  #ed-rows .r input.a { flex:1; min-width:0; font-size:13px; }
+  #ed-rows .r button { flex:none; padding:10px 12px; color:#ff9b9b; }
+  #editor .foot { display:flex; gap:8px; padding:12px 14px calc(12px + env(safe-area-inset-bottom)); }
+  #editor .foot button { flex:1; padding:13px 4px; }
+  #ed-save { background:#2563eb; border-color:#2563eb; color:#fff; font-weight:700; }
 </style>
 </head>
 <body>
@@ -79,10 +110,34 @@
   <img id="screen" style="display:none" alt="screen">
 </div>
 
+<div id="btnbar"><!-- 自定义快捷键，由 /api/instances 动态生成 --></div>
+
 <div id="tools">
-  <button id="btn-kb">键盘</button>
-  <div id="custom-btns" style="display:contents"></div>
-  <button id="btn-reconnect">重连</button>
+  <button id="btn-kb">⌨ 键盘</button>
+  <button id="btn-edit">⚙ 自定义</button>
+  <button id="btn-reconnect">⟳ 重连</button>
+</div>
+
+<div id="editor">
+  <div class="panel">
+    <div class="head">
+      自定义快捷键
+      <span class="spacer"></span>
+      <button id="ed-close">关闭</button>
+    </div>
+    <div class="tip">
+      每行一个按钮：按钮名 + 动作，动作之间用 <code>|</code> 分隔。<br>
+      常用动作：<code>key:4</code> 返回 · <code>tap:500,145</code> 点坐标(0~1000) ·
+      <code>swipe:500,900,500,300</code> 滑动 · <code>sleep:0.3</code> 等待 ·
+      <code>shell:命令</code> 任意 adb 命令<br>
+      保存后立即生效，不用重启服务。
+    </div>
+    <div id="ed-rows"></div>
+    <div class="foot">
+      <button id="ed-add">+ 添加按钮</button>
+      <button id="ed-save">保存到被控端</button>
+    </div>
+  </div>
 </div>
 
 <div id="kb">
@@ -94,7 +149,71 @@
 const $=id=>document.getElementById(id);
 const screen=$('screen'), stage=$('stage'), statusEl=$('statusbar'), statusText=$('status-text');
 const hint=$('hint'), setup=$('setup');
-let ws=null, connected=false, authRequired=true;
+let ws=null, connected=false, authRequired=true, currentActions={};
+
+// 渲染自定义快捷键按钮（横向滚动，按钮不会被挤扁）
+function renderButtons(){
+  const box=$('btnbar'); box.innerHTML='';
+  Object.keys(currentActions).forEach(name=>{
+    const b=document.createElement('button');
+    b.textContent=name;
+    b.onclick=()=>send({type:'action',name:name});
+    box.appendChild(b);
+  });
+}
+
+// ---- 自定义面板 ----
+function addEditRow(name, steps){
+  const r=document.createElement('div'); r.className='r';
+  const ni=document.createElement('input'); ni.className='n'; ni.placeholder='按钮名'; ni.value=name||'';
+  const ai=document.createElement('input'); ai.className='a'; ai.placeholder='动作，如 tap:500,145'; ai.value=steps||'';
+  const del=document.createElement('button'); del.textContent='✕'; del.title='删除这个按钮';
+  del.onclick=()=>r.remove();
+  r.appendChild(ni); r.appendChild(ai); r.appendChild(del);
+  $('ed-rows').appendChild(r);
+  return r;
+}
+
+function openEditor(){
+  const rows=$('ed-rows'); rows.innerHTML='';
+  const names=Object.keys(currentActions);
+  if(!names.length){ addEditRow('',''); }
+  else names.forEach(n=>addEditRow(n, (currentActions[n]||[]).join(' | ')));
+  $('editor').classList.add('show');
+}
+
+function collectEditor(){
+  const out={};
+  $('ed-rows').querySelectorAll('.r').forEach(r=>{
+    const n=r.querySelector('.n').value.trim();
+    const a=r.querySelector('.a').value.trim();
+    if(!n) return;
+    out[n]=a.split('|').map(s=>s.trim()).filter(Boolean);
+  });
+  return out;
+}
+
+async function saveEditor(){
+  const actions=collectEditor();
+  if(!Object.keys(actions).length){ alert('至少要留一个按钮'); return; }
+  const btn=$('ed-save'); btn.disabled=true; btn.textContent='保存中…';
+  try{
+    const r=await fetch('/api/buttons',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({token:$('token').value.trim(), actions:actions})
+    });
+    const d=await r.json();
+    if(!r.ok || !d.ok) throw new Error(d.error||('HTTP '+r.status));
+    currentActions=d.actions||actions;
+    renderButtons();
+    $('editor').classList.remove('show');
+    setStatus('快捷键已保存 · '+Object.keys(currentActions).length+' 个','s-ok');
+  }catch(e){
+    alert('保存失败：'+e.message);
+  }finally{
+    btn.disabled=false; btn.textContent='保存到被控端';
+  }
+}
 
 // 记住口令与上次选的实例，避免每次手输
 try {
@@ -125,14 +244,10 @@ fetch('/api/instances').then(r=>{
   if(!authRequired){
     $('token-row').style.display='none';   // 免口令：整个口令框藏起来，只剩实例+连接
   }
-  // 按被控端配置动态生成快捷键按钮（名字和动作都在 config.json 里自己组）
-  const box=$('custom-btns'); box.innerHTML='';
-  (d.buttons||[]).forEach(name=>{
-    const b=document.createElement('button');
-    b.textContent=name;
-    b.onclick=()=>send({type:'action',name:name});
-    box.appendChild(b);
-  });
+  // 按被控端配置动态生成快捷键按钮（名字和动作都在 config.json 里，网页里也能改）
+  currentActions = (d.actions && typeof d.actions==='object') ? d.actions : {};
+  (d.buttons||[]).forEach(n=>{ if(!(n in currentActions)) currentActions[n]=[]; });
+  renderButtons();
   const sel=$('instance');
   sel.innerHTML='';
   const ports=Object.entries(d.instances);
@@ -252,6 +367,11 @@ $('connect').onclick=connect;
 $('btn-reconnect').onclick=connect;
 $('btn-disconn').onclick=disconnect;
 $('btn-kb').onclick=()=>{ const k=$('kb'); k.style.display=k.style.display==='none'?'flex':'none'; };
+$('btn-edit').onclick=openEditor;
+$('ed-close').onclick=()=>$('editor').classList.remove('show');
+$('ed-add').onclick=()=>addEditRow('','');
+$('ed-save').onclick=saveEditor;
+$('editor').onclick=e=>{ if(e.target.id==='editor') $('editor').classList.remove('show'); };
 $('send').onclick=()=>{ const v=$('text').value; if(v){ send({type:'text',value:v}); $('text').value=''; } };
 $('token').addEventListener('keydown',e=>{ if(e.key==='Enter') connect(); });
 </script>

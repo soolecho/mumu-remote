@@ -44,18 +44,67 @@ app.mount("/static", StaticFiles(directory=os.path.join(BASE, "static")), name="
 
 @app.get("/")
 async def index():
-    return FileResponse(os.path.join(BASE, "static", "index.html"))
+    # no-store：避免手机浏览器缓存旧页面，导致新加的按钮/界面改动看不到
+    return FileResponse(
+        os.path.join(BASE, "static", "index.html"),
+        headers={"Cache-Control": "no-store, must-revalidate", "Pragma": "no-cache"},
+    )
 
 
 @app.get("/api/instances")
 async def instances():
     # auth_required 告诉手机端是否需要口令：留空口令时网页自动隐藏口令框，免输入直连
-    return JSONResponse({
-        "instances": {t["id"]: t["name"] for t in TARGETS},
-        "auth_required": bool(getattr(config, "ACCESS_TOKEN", "")),
-        "buttons": list(getattr(config, "BUTTON_ACTIONS", {}).keys()),
-        "targets": TARGETS,
-    })
+    return JSONResponse(
+        {
+            "instances": {t["id"]: t["name"] for t in TARGETS},
+            "auth_required": bool(getattr(config, "ACCESS_TOKEN", "")),
+            "buttons": list(getattr(config, "BUTTON_ACTIONS", {}).keys()),
+            "actions": dict(getattr(config, "BUTTON_ACTIONS", {})),
+            "targets": TARGETS,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _save_button_actions(actions):
+    """把按钮映射写回 config.json，并热更新内存里的配置（不用重启服务）。"""
+    path = getattr(config, "CONFIG_FILE", os.path.join(BASE, "config.json"))
+    data = {}
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f) or {}
+        except Exception:
+            data = {}
+    data["BUTTON_ACTIONS"] = actions
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    config.BUTTON_ACTIONS = actions
+
+
+@app.post("/api/buttons")
+async def save_buttons(payload: dict):
+    """手机/网页端自定义快捷键：{token, actions:{按钮名:[动作...]}}"""
+    if getattr(config, "ACCESS_TOKEN", "") and payload.get("token", "") != config.ACCESS_TOKEN:
+        return JSONResponse({"ok": False, "error": "口令不正确"}, status_code=403)
+    raw = payload.get("actions") or {}
+    if not isinstance(raw, dict):
+        return JSONResponse({"ok": False, "error": "actions 必须是对象"}, status_code=400)
+    clean = {}
+    for name, steps in raw.items():
+        name = str(name).strip()
+        if not name:
+            continue
+        if isinstance(steps, str):
+            steps = [s.strip() for s in steps.split("|") if s.strip()]
+        steps = [str(s).strip() for s in (steps or []) if str(s).strip()]
+        if steps:
+            clean[name] = steps
+    try:
+        _save_button_actions(clean)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"保存失败：{e}"}, status_code=500)
+    return JSONResponse({"ok": True, "buttons": list(clean.keys()), "actions": clean})
 
 
 # ---------- Windows 程序管理（并行路线，类似 ToDesk 应用中心）----------
