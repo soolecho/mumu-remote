@@ -9,12 +9,14 @@ import os
 import re
 import shutil
 import string
+import socket
 import subprocess
 import sys
 import random
+import time
 from datetime import datetime
 
-from PyQt6.QtCore import QProcess, QProcessEnvironment, Qt
+from PyQt6.QtCore import QProcess, QProcessEnvironment, Qt, QTimer
 from PyQt6.QtGui import QAction, QFont, QIcon
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (
@@ -29,6 +31,58 @@ import config
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 SINGLE_INSTANCE_KEY = "mumu_remote_gui_single_instance"
+
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def port_in_use(port: int) -> bool:
+    """端口是否已被监听（本地探测，不依赖外部命令）。"""
+    if port <= 0:
+        return False
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.35)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _run_quiet(cmd: list, timeout: int = 10):
+    """执行命令并返回 (returncode, 文本)。Windows 控制台是 GBK，统一容错解码。"""
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout,
+                           creationflags=_NO_WINDOW)
+    except Exception:
+        return -1, ""
+    out = (r.stdout or b"") + (r.stderr or b"")
+    for enc in ("utf-8", "gbk", "latin-1"):
+        try:
+            return r.returncode, out.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return r.returncode, out.decode("utf-8", "ignore")
+
+
+def port_owner_pid(port: int) -> int:
+    """返回占用该端口的 LISTENING 进程 PID；查不到返回 0。"""
+    rc, text = _run_quiet(["netstat", "-ano"])
+    if rc != 0:
+        return 0
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        if parts[1].endswith(f":{port}") and parts[3].upper() == "LISTENING":
+            try:
+                return int(parts[4])
+            except ValueError:
+                continue
+    return 0
+
+
+def kill_pid(pid: int) -> bool:
+    """强制结束进程；成功返回 True。"""
+    if not pid:
+        return False
+    rc, _ = _run_quiet(["taskkill", "/PID", str(pid), "/F"])
+    return rc == 0
 
 
 class MainWindow(QMainWindow):
@@ -817,7 +871,7 @@ class MainWindow(QMainWindow):
         self.sp_w.setValue(w)
         self.sp_h.setValue(h)
 
-    def start_service(self):
+    def start_service(self, ask: bool = True):
         if self.proc.state() != QProcess.ProcessState.NotRunning:
             return
         if not self.save_config(silent=True):
@@ -825,6 +879,42 @@ class MainWindow(QMainWindow):
             return
         host = self.ed_host.text().strip() or "0.0.0.0"
         port = self.sp_port.value()
+
+        # 端口预检：避免 uvicorn 起来后 [WinError 10048] 退出码 3
+        if port_in_use(port):
+            pid = port_owner_pid(port)
+            who = f"PID {pid}" if pid else "未知进程"
+            if not ask:
+                self._log(f"端口 {port} 已被占用（{who}），跳过自动启动。")
+                return
+            ret = QMessageBox.question(
+                self, "端口被占用",
+                f"端口 {port} 已被占用（{who}）。\n\n"
+                "多半是上次没退干净的服务进程。\n\n"
+                "【Yes】结束该进程并继续启动服务\n"
+                "【No】取消（可以先改端口再启动）",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if ret != QMessageBox.StandardButton.Yes:
+                self._log(f"端口 {port} 被占用，已取消启动。")
+                return
+            if not kill_pid(pid):
+                QMessageBox.warning(
+                    self, "无法自动清理",
+                    f"结束进程失败，请手动关闭占用 {port} 端口的程序（或用管理员身份运行本程序）后再试。",
+                )
+                return
+            self._log(f"已结束占用 {port} 端口的进程 PID {pid}")
+            for _ in range(10):
+                if not port_in_use(port):
+                    break
+                time.sleep(0.2)
+            if port_in_use(port):
+                QMessageBox.warning(self, "端口仍被占用",
+                                    f"端口 {port} 仍在被监听，可能已被其他进程立刻重新占用。")
+                return
+
         self.proc.start(sys.executable, [
             "-m", "uvicorn", "server:app", "--host", host, "--port", str(port)
         ])
@@ -863,6 +953,11 @@ class MainWindow(QMainWindow):
         self.lb_status.setText(f"服务未运行（退出码 {code}）")
         self._sync_tray_menu()
         self._log(f"服务进程退出，退出码 {code}")
+        port = self.sp_port.value()
+        if port_in_use(port):
+            pid = port_owner_pid(port)
+            self._log(f"提示：端口 {port} 仍被占用（PID {pid or '未知'}），"
+                      "再点【启动服务】会提示自动清理。")
 
     def _log(self, text: str):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -1105,6 +1200,10 @@ def main():
         server.newConnection.connect(_on_new_connection)
     app._mumu_single_instance_server = server  # 保活，防止被 GC 释放
     win.show()
+
+    # --autostart：界面起来后自动启动服务（端口占用时只记日志，不弹窗）
+    if "--autostart" in sys.argv:
+        QTimer.singleShot(600, lambda: win.start_service(ask=False))
 
     code = app.exec()
     if server is not None:
