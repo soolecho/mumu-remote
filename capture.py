@@ -15,6 +15,30 @@ except Exception:
     _SHM_CLASS = None
 _SHM = {}
 
+# Windows 通用窗口捕获（并行路线）
+try:
+    import win32_window
+    _WIN32_AVAILABLE = True
+except Exception:
+    win32_window = None
+    _WIN32_AVAILABLE = False
+_WIN32_CAPS = {}
+
+# 目标 id -> 目标配置（mumu / win32），由 server 启动时注入
+_TARGETS: dict = {}
+
+
+def set_targets(targets):
+    global _TARGETS
+    _TARGETS = {str(t["id"]): t for t in targets}
+
+
+def target_type(target_id: str) -> str:
+    t = _TARGETS.get(str(target_id))
+    if t:
+        return t.get("type", "mumu")
+    return "mumu"  # 没声明就当 MuMu，兼容老配置
+
 
 class CaptureState:
     """每个实例一个捕获状态：缓存最新帧 + 节流，避免多人/reflow 重复抓"""
@@ -100,12 +124,46 @@ def _grab_shm(port: str) -> bytes:
     return buf.getvalue()
 
 
+def _grab_win32(target_id: str) -> bytes:
+    """按窗口句柄抓任意 Windows 程序画面。"""
+    if not _WIN32_AVAILABLE:
+        raise RuntimeError("窗口捕获模块不可用（需要 Windows）")
+    t = _TARGETS.get(str(target_id), {})
+    hwnd = t.get("hwnd")
+    if hwnd is None:
+        try:
+            hwnd = int(str(target_id), 0)  # id 本身可能是 0x12345
+        except ValueError:
+            raise RuntimeError(f"win32 目标 {target_id} 缺少 hwnd")
+    method = t.get("method", "print")
+    cap = _WIN32_CAPS.get(target_id)
+    if cap is None:
+        cap = win32_window.WindowCapture(int(hwnd), method)
+        _WIN32_CAPS[target_id] = cap
+    from PIL import Image
+    try:
+        w, h, arr = win32_window._capture_dib(int(hwnd), method)
+    except Exception:
+        # 窗口关了/失效，重建一次
+        cap = win32_window.WindowCapture(int(hwnd), method)
+        _WIN32_CAPS[target_id] = cap
+        w, h, arr = win32_window._capture_dib(int(hwnd), method)
+    img = Image.frombytes("RGB", (w, h), arr)
+    if (config.TARGET_WIDTH, config.TARGET_HEIGHT) != img.size:
+        img = img.resize((config.TARGET_WIDTH, config.TARGET_HEIGHT))
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=config.JPEG_QUALITY)
+    return buf.getvalue()
+
+
 def _loop(state: CaptureState):
     interval = 1.0 / max(1, config.FPS)
     while state.running:
         t0 = time.time()
         try:
-            if config.CAPTURE_METHOD == "mumu_shm":
+            if target_type(state.port) == "win32":
+                frame = _grab_win32(state.port)
+            elif config.CAPTURE_METHOD == "mumu_shm":
                 frame = _grab_shm(state.port)
             else:
                 frame = _grab_adb(state.port)

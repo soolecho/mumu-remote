@@ -64,10 +64,57 @@ def text(port: str, value: str):
 
 
 def key(port: str, code: str):
-    """keyevent：BACK=4 HOME=3 电源=26 音量+=24 音量-=25"""
-    _input(port, "keyevent", code)
+    """keyevent：BACK=4 HOME=3 电源=26 音量+=24 音量-=25
+
+    MuMu 15 的 HOME(3) 只发给 display 0（桌面），对 display 2 里的 App 无效。
+    这里做兼容：HOME 改成连按几次 BACK，退到 App 主页。可用 BUTTON_ACTIONS 覆盖。
+    """
+    import time
+    actions = getattr(config, "BUTTON_ACTIONS", {})
+    if str(code) == "3" and "home" in actions:
+        run_actions(port, actions["home"])
+        return
+    _input(port, "keyevent", str(code))
 
 
 def shell(port: str, command: str):
     """放行任意 shell 命令（受口令保护，谨慎开放）"""
     _adb(port, "shell", command)
+
+
+def run_actions(port: str, actions):
+    """执行一串自定义动作。每一步是字符串，语法：
+
+        key:4            按一次 keyevent 4（BACK）
+        key:4,4,4        连按三次
+        tap:500,300      点归一化坐标 (0-1000)
+        swipe:500,900,500,300  滑动
+        sleep:0.2        等待 0.2 秒
+        shell:input keyevent 3 任意 adb shell 命令
+    """
+    import time
+    for step in actions:
+        step = str(step).strip()
+        if not step or step.startswith("#"):
+            continue
+        head, _, arg = step.partition(":")
+        head = head.strip().lower()
+        arg = arg.strip()
+        if head == "key":
+            for code in arg.split(","):
+                _input(port, "keyevent", code.strip())
+        elif head == "tap":
+            xy = arg.split(",")
+            if len(xy) == 2:
+                tap(port, float(xy[0]), float(xy[1]))
+        elif head == "swipe":
+            c = arg.split(",")
+            if len(c) == 4:
+                swipe(port, float(c[0]), float(c[1]), float(c[2]), float(c[3]))
+        elif head == "sleep":
+            try:
+                time.sleep(max(0, min(5, float(arg))))
+            except ValueError:
+                pass
+        elif head == "shell":
+            _adb(port, "shell", arg)

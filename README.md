@@ -11,9 +11,11 @@ mumu-remote/
 ├── config.example.json    # 配置示例（复制成 config.json 再改）
 ├── config.json            # 你的实际配置（含口令，已被 .gitignore 排除，勿提交）
 ├── mumu_shm.py            # 共享内存截图（MuMu 的 external_renderer_ipc.dll）
-├── capture.py             # 画面捕获（ADB / MuMu 共享内存）
-├── input_ctl.py           # ADB 输入（tap/swipe/text/key）
-├── server.py              # FastAPI + WebSocket 服务
+├── capture.py             # 画面捕获（ADB / MuMu 共享内存 / Windows 窗口句柄）
+├── input_ctl.py           # ADB 输入（tap/swipe/text/key）+ 自定义动作
+├── win32_window.py        # 并行路线：按窗口句柄抓任意 Windows 程序
+├── win32_apps.py          # 并行路线：检测运行中程序、按 exe 拉起程序
+├── server.py              # FastAPI + WebSocket 服务（双后端路由）
 ├── static/index.html      # 手机网页端
 ├── requirements.txt
 └── .gitignore
@@ -113,6 +115,45 @@ python -m uvicorn server:app --host 0.0.0.0 --port 8000
 - **安全**：骨架里的 `/shell` 输入通道没暴露成 HTTP 接口，只有 tap/swipe/text/key 四类。口令别用默认的。
 - **端口会变**：MuMu 端口被占用时会 +1（如 16385），每次启动后以多开器显示的为准，在界面里点【扫描在线实例】更新。
 - **这是骨架**：没有多用户、没有自适应码率。验证原理和自用足够，要当产品用需要再加认证与流控。
+
+## 并行路线：抓任意 Windows 窗口（实验）
+
+MuMu 走 ADB 这条主线不受影响。另开了一条通用路线，能像 ToDesk 那样按窗口抓画面：
+
+- 在 GUI 底部点【窗口捕获(实验)】，会列出所有运行中的程序（窗口标题、exe 路径、句柄）
+- 没启动的程序点【添加 exe…】选好文件，再点【启动选中程序】拉起来
+- 【抓帧预览】验证能不能抓到画面（硬件加速窗口可能要换 blt）
+- 【加入手机端】把它写进配置，重启服务后手机端就能选它
+
+配置里是 `TARGETS` 列表，每项声明后端类型：
+
+```json
+"TARGETS": [
+  {"id": "16384", "type": "mumu", "name": "实例0"},
+  {"id": "0x6087c", "type": "win32", "name": "微信", "hwnd": 395388, "method": "print"}
+]
+```
+
+`type=mumu` 走 ADB + 共享内存（可控制）；`type=win32` 走窗口句柄（**当前只读预览**，键鼠映射待做）。`TARGETS` 留空时自动按老 `INSTANCES` 建 mumu 目标，向后兼容。
+
+抓帧实现（`win32_window.py`）三条路：
+- `PrintWindow` + `PW_RENDERFULLCONTENT`：后台抓，被遮挡也能拿到，实测微信 28ms/帧
+- `BitBlt`：兜底，要求窗口在前台无遮挡
+- Windows Graphics Capture：最稳但需 winrt 封装，预留接口
+
+两种后端的取舍：ADB 不认前台窗口、不怕遮挡、点击必达对应实例；窗口句柄路线通用（任何程序）但依赖 Windows API 的抓帧行为，硬件加速程序可能黑屏。**手机端和输入层已按目标类型分流，互不影响。**
+
+## 快捷键：自己组按钮
+
+GUI 的【快捷键】框里可以自定义手机底部的按钮，格式 `按钮名=动作; 按钮名=动作`，动作之间用 `|` 分隔：
+
+```
+综合调度=tap:55,145; 代维管理=tap:230,145; 主页=key:4|sleep:0.2|key:4
+```
+
+支持 `key:4`（按键）、`tap:500,300`（归一化坐标点击）、`swipe:...`（滑动）、`sleep:0.2`（等待）、`shell:命令`。坐标是 0~1000 归一化，按 720×1280 屏幕量。保存配置并重启服务后，手机网页底部会自动出现这些按钮。
+
+注意：MuMu 15 里 `key:3`（HOME）只发给桌面 display，对 App 无效；有些 App 第一次返回会弹"确认退出"，连按会卡在弹窗——这类 App 建议直接点它自己的顶部 Tab 来切换页面。
 
 ## 下一步可以做的
 

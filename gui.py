@@ -18,7 +18,7 @@ from PyQt6.QtCore import QProcess, QProcessEnvironment, Qt
 from PyQt6.QtGui import QAction, QFont, QIcon
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFileDialog,
     QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
     QSpinBox, QSystemTrayIcon, QTableWidget, QTableWidgetItem, QVBoxLayout,
@@ -192,6 +192,20 @@ class MainWindow(QMainWindow):
         form.addRow("输入方式", self.cb_input)
         self.ck_adbkb = QCheckBox("已装 ADBKeyboard（不开中文打不进去）")
         form.addRow("中文输入", self.ck_adbkb)
+        # 自定义快捷键：按钮名 -> 动作串，手机网页会自动显示这些按钮
+        row = QHBoxLayout()
+        self.ed_actions = QLineEdit()
+        self.ed_actions.setPlaceholderText("返回=key:4; 主页=key:4,sleep:0.2,key:4; 菜单=key:82")
+        self.ed_actions.setToolTip(
+            "格式：按钮名=动作; 按钮名=动作\n"
+            "动作：key:4 按键 / key:4,4,4 连按 / tap:500,300 点击 / "
+            "swipe:500,900,500,300 滑动 / sleep:0.2 等待 / shell:命令"
+        )
+        row.addWidget(self.ed_actions, 1)
+        b = QPushButton("按键帮助")
+        b.clicked.connect(self.show_action_help)
+        row.addWidget(b)
+        form.addRow("快捷键", row)
         row = QHBoxLayout()
         self.ed_host = QLineEdit()
         self.ed_host.setFixedWidth(100)
@@ -256,7 +270,8 @@ class MainWindow(QMainWindow):
         v.setSpacing(4)
         row = QHBoxLayout()
         for text, fn in (("保存配置", lambda: self.save_config()),
-                         ("重新载入", self.reload_from_file), ("打开配置文件", self.open_config_file)):
+                         ("重新载入", self.reload_from_file), ("打开配置文件", self.open_config_file),
+                         ("窗口捕获(实验)", self.open_window_picker)):
             b = QPushButton(text)
             b.clicked.connect(fn)
             row.addWidget(b)
@@ -323,6 +338,7 @@ class MainWindow(QMainWindow):
         idx = self.cb_input.findData(getattr(config, "INPUT_METHOD", "adb"))
         self.cb_input.setCurrentIndex(idx if idx >= 0 else 0)
         self.ck_adbkb.setChecked(config.ADBKEYBOARD_ENABLED)
+        self.ed_actions.setText(self._actions_to_text(getattr(config, "BUTTON_ACTIONS", {})))
         self.ed_host.setText(config.HOST)
         self.sp_port.setValue(config.PORT)
         self.ed_token.setText(config.ACCESS_TOKEN)
@@ -330,6 +346,50 @@ class MainWindow(QMainWindow):
         self.btn_token_eye.setText("隐藏")
         self._update_url()
         self._update_token_state()
+
+    @staticmethod
+    def _actions_to_text(actions: dict) -> str:
+        """{'返回': ['key:4']} -> '返回=key:4'；多个动作用 | 分隔。"""
+        parts = []
+        for name, steps in (actions or {}).items():
+            parts.append(f"{name}={'|'.join(str(s) for s in steps)}")
+        return "; ".join(parts)
+
+    @staticmethod
+    def _text_to_actions(text: str) -> dict:
+        """分号隔按钮，等号分名字，竖线隔动作（逗号留给 tap/swipe 的参数）。"""
+        result = {}
+        for seg in text.split(";"):
+            seg = seg.strip()
+            if not seg or "=" not in seg:
+                continue
+            name, _, steps = seg.partition("=")
+            name = name.strip()
+            steps = steps.strip()
+            if not name or not steps:
+                continue
+            result[name] = [s.strip() for s in steps.split("|") if s.strip()]
+        return result
+
+    def show_action_help(self):
+        QMessageBox.information(self, "快捷键语法",
+            "在【快捷键】框里自己组按钮，格式：\n"
+            "  按钮名=动作; 按钮名=动作\n"
+            "分号隔按钮，竖线 | 隔动作（逗号是 tap/swipe 的参数）\n\n"
+            "示例：\n"
+            "  返回=key:4; 主页=key:4|sleep:0.2|key:4; 菜单=key:82\n\n"
+            "可用动作：\n"
+            "  key:4            按 BACK（4=返回, 3=Home, 82=菜单, 66=确定, 187=多任务）\n"
+            "  tap:500,300      点击归一化坐标(0~1000)\n"
+            "  swipe:500,900,500,300  滑动\n"
+            "  sleep:0.2        等 0.2 秒\n"
+            "  shell:命令       任意 adb shell 命令\n\n"
+            "保存配置→重启服务后，手机网页底部会自动出现这些按钮。\n\n"
+            "两个坑：\n"
+            "1. MuMu 15 里 HOME(3) 只发给桌面，对 App 无效，别用 key:3。\n"
+            "2. 有些 App 第一次返回会弹\"确认退出\"，连按两次会卡在弹窗。\n"
+            "   想回主页建议直接点 App 自己的底部 Tab，比如：\n"
+            "   首页=tap:500,973（坐标是 0~1000 归一化，按 720x1280 屏幕量）")
 
     def _collect(self) -> dict:
         instances = {}
@@ -367,6 +427,7 @@ class MainWindow(QMainWindow):
             "JPEG_QUALITY": self.sp_quality.value(),
             "INPUT_METHOD": self.cb_input.currentData(),
             "ADBKEYBOARD_ENABLED": self.ck_adbkb.isChecked(),
+            "BUTTON_ACTIONS": self._text_to_actions(self.ed_actions.text()),
             "HOST": self.ed_host.text().strip() or "0.0.0.0",
             "PORT": self.sp_port.value(),
             "ACCESS_TOKEN": self.ed_token.text().strip(),
@@ -408,6 +469,10 @@ class MainWindow(QMainWindow):
             self.save_config(silent=True)
         if os.path.exists(config.CONFIG_FILE):
             os.startfile(config.CONFIG_FILE)
+
+    def open_window_picker(self):
+        dlg = WindowPickerDialog(self)
+        dlg.exec()
 
     # ---------- ADB 辅助 ----------
     def _adb(self, *args: str, timeout: int = 15) -> subprocess.CompletedProcess:
@@ -802,6 +867,208 @@ class MainWindow(QMainWindow):
     def _log(self, text: str):
         ts = datetime.now().strftime("%H:%M:%S")
         self.log.appendPlainText(f"[{ts}] {text}")
+
+
+class WindowPickerDialog(QDialog):
+    """窗口捕获（实验路线）：列出运行中程序，添加/启动，抓帧预览。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("窗口捕获（实验）· 任意 Windows 程序")
+        icon_path = os.path.join(BASE, "app.ico")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+        self.resize(900, 620)
+        self.setFont(QFont("Microsoft YaHei UI", 9))
+        self._build()
+
+    def _build(self):
+        v = QVBoxLayout(self)
+        v.setContentsMargins(10, 10, 10, 10)
+        v.setSpacing(6)
+
+        info = QLabel(
+            "并行路线：这里列出的程序都能按窗口句柄抓画面。选中一个点【抓帧预览】验证；"
+            "要让它出现在手机端，点【加入手机端】写入配置后重启服务。"
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#7dd3fc;")
+        v.addWidget(info)
+
+        row = QHBoxLayout()
+        b = QPushButton("刷新运行中程序")
+        b.clicked.connect(self.refresh)
+        row.addWidget(b)
+        b = QPushButton("添加 exe…")
+        b.clicked.connect(self.add_exe)
+        row.addWidget(b)
+        b = QPushButton("启动选中程序")
+        b.setToolTip("没运行的程序可以从这里拉起来")
+        b.clicked.connect(self.start_selected)
+        row.addWidget(b)
+        b = QPushButton("抓帧预览")
+        b.clicked.connect(self.preview)
+        row.addWidget(b)
+        b = QPushButton("加入手机端")
+        b.clicked.connect(self.add_to_targets)
+        row.addWidget(b)
+        row.addStretch(1)
+        v.addLayout(row)
+
+        self.tbl = QTableWidget(0, 5)
+        self.tbl.setHorizontalHeaderLabels(["窗口句柄", "窗口标题", "程序名", "exe 路径", "状态"])
+        self.tbl.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.tbl.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.tbl.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        v.addWidget(self.tbl, 1)
+
+        self.preview_lbl = QLabel("抓帧预览会显示在这里")
+        self.preview_lbl.setMinimumHeight(120)
+        self.preview_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_lbl.setStyleSheet("border:1px solid #45454b; color:#888;")
+        v.addWidget(self.preview_lbl)
+
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMaximumHeight(70)
+        v.addWidget(self.log)
+
+        self.refresh()
+
+    def _log(self, text):
+        self.log.appendPlainText(f"[{datetime.now():%H:%M:%S}] {text}")
+
+    def refresh(self):
+        self.tbl.setRowCount(0)
+        try:
+            import win32_apps
+            apps = win32_apps.list_running_apps()
+        except Exception as e:
+            self._log(f"扫描失败：{e}")
+            return
+        n = 0
+        for app in apps:
+            exe = app["exe"]
+            for w in app["windows"]:
+                if not w["title"]:
+                    continue
+                r = self.tbl.rowCount()
+                self.tbl.insertRow(r)
+                self.tbl.setItem(r, 0, QTableWidgetItem(hex(w["hwnd"])))
+                self.tbl.setItem(r, 1, QTableWidgetItem(w["title"]))
+                self.tbl.setItem(r, 2, QTableWidgetItem(app["name"]))
+                self.tbl.setItem(r, 3, QTableWidgetItem(exe))
+                self.tbl.setItem(r, 4, QTableWidgetItem("运行中"))
+                self.tbl.item(r, 0).setData(Qt.ItemDataRole.UserRole, {"hwnd": w["hwnd"], "exe": exe})
+                n += 1
+        self._log(f"扫描到 {n} 个窗口")
+
+    def _selected(self):
+        r = self.tbl.currentRow()
+        if r < 0:
+            QMessageBox.information(self, "提示", "请先选中一行")
+            return None
+        item = self.tbl.item(r, 0)
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def add_exe(self):
+        path, _ = QFileDialog.getOpenFileName(self, "选择程序 exe", "", "可执行文件 (*.exe);;所有文件 (*.*)")
+        if not path:
+            return
+        r = self.tbl.rowCount()
+        self.tbl.insertRow(r)
+        self.tbl.setItem(r, 0, QTableWidgetItem("(未启动)"))
+        self.tbl.setItem(r, 1, QTableWidgetItem(os.path.basename(path)))
+        self.tbl.setItem(r, 2, QTableWidgetItem(os.path.splitext(os.path.basename(path))[0]))
+        self.tbl.setItem(r, 3, QTableWidgetItem(path))
+        self.tbl.setItem(r, 4, QTableWidgetItem("未运行"))
+        self.tbl.item(r, 3).setData(Qt.ItemDataRole.UserRole, {"hwnd": None, "exe": path})
+        self._log(f"已添加：{path}（点【启动选中程序】拉起来）")
+
+    def start_selected(self):
+        d = self._selected()
+        if not d:
+            return
+        try:
+            import win32_apps
+            exe = d["exe"]
+            res = win32_apps.start_app(exe)
+            if res.get("already_running"):
+                self._log("程序已在运行")
+            elif res.get("started"):
+                self._log(f"已启动：{exe}，等待窗口出现…")
+            else:
+                self._log(f"启动失败：{res.get('error')}")
+                return
+            w = win32_apps.wait_for_window(exe, timeout=10)
+            if w:
+                self._log(f"窗口已出现：{hex(w['hwnd'])} {w['title']}")
+            else:
+                self._log("进程启动了但没找到窗口，点【刷新】再看看")
+            self.refresh()
+        except Exception as e:
+            self._log(f"启动失败：{e}")
+
+    def preview(self):
+        d = self._selected()
+        if not d:
+            return
+        hwnd = d.get("hwnd")
+        if not hwnd:
+            self._log("这个程序还没启动，先点【启动选中程序】")
+            return
+        try:
+            import win32_window as ww
+            from PIL import Image
+            w, h, arr = ww._capture_dib(hwnd, "print")
+            img = Image.frombytes("RGB", (w, h), arr)
+            img.thumbnail((640, 300))
+            tmp = os.path.join(BASE, "_preview.png")
+            img.save(tmp)
+            self.preview_lbl.setPixmap(QIcon(tmp).pixmap(img.size()))
+            self._log(f"抓帧成功：{w}×{h}，{len(arr)} 字节")
+        except Exception as e:
+            self._log(f"抓帧失败：{e}（硬件加速窗口可试试 blt）")
+
+    def add_to_targets(self):
+        d = self._selected()
+        if not d:
+            return
+        hwnd = d.get("hwnd")
+        if not hwnd:
+            self._log("这个程序还没启动，先启动后再加入")
+            return
+        # 读现有 TARGETS，追加一条 win32 目标
+        path = config.CONFIG_FILE
+        data = {}
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                pass
+        targets = data.get("TARGETS", [])
+        tid = hex(hwnd)
+        if any(t.get("id") == tid for t in targets):
+            self._log(f"{tid} 已在手机端目标里")
+            return
+        import win32_window as ww
+        targets.append({
+            "id": tid,
+            "type": "win32",
+            "name": ww.WindowCapture.title(hwnd) or d["exe"],
+            "hwnd": hwnd,
+            "exe": d["exe"],
+            "method": "print",
+        })
+        data["TARGETS"] = targets
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        self._log(f"已加入手机端目标：{tid}。重启服务后手机端可选。")
 
 
 def main():

@@ -81,8 +81,7 @@
 
 <div id="tools">
   <button id="btn-kb">键盘</button>
-  <button id="btn-back">返回</button>
-  <button id="btn-home">Home</button>
+  <div id="custom-btns" style="display:contents"></div>
   <button id="btn-reconnect">重连</button>
 </div>
 
@@ -126,6 +125,14 @@ fetch('/api/instances').then(r=>{
   if(!authRequired){
     $('token-row').style.display='none';   // 免口令：整个口令框藏起来，只剩实例+连接
   }
+  // 按被控端配置动态生成快捷键按钮（名字和动作都在 config.json 里自己组）
+  const box=$('custom-btns'); box.innerHTML='';
+  (d.buttons||[]).forEach(name=>{
+    const b=document.createElement('button');
+    b.textContent=name;
+    b.onclick=()=>send({type:'action',name:name});
+    box.appendChild(b);
+  });
   const sel=$('instance');
   sel.innerHTML='';
   const ports=Object.entries(d.instances);
@@ -244,8 +251,6 @@ screen.addEventListener('mouseup',()=>{ if(startPt&&!moved) send({type:'tap',x:s
 $('connect').onclick=connect;
 $('btn-reconnect').onclick=connect;
 $('btn-disconn').onclick=disconnect;
-$('btn-back').onclick=()=>send({type:'key',code:'4'});
-$('btn-home').onclick=()=>send({type:'key',code:'3'});
 $('btn-kb').onclick=()=>{ const k=$('kb'); k.style.display=k.style.display==='none'?'flex':'none'; };
 $('send').onclick=()=>{ const v=$('text').value; if(v){ send({type:'text',value:v}); $('text').value=''; } };
 $('token').addEventListener('keydown',e=>{ if(e.key==='Enter') connect(); });
