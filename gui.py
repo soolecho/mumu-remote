@@ -15,7 +15,7 @@ import random
 from datetime import datetime
 
 from PyQt6.QtCore import QProcess, QProcessEnvironment, Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog,
     QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
@@ -32,6 +32,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("MuMu 远控 · 被控端配置")
+        icon_path = os.path.join(BASE, "app.ico")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
         self.resize(980, 720)
         self.setMinimumSize(880, 660)
         self.setFont(QFont("Microsoft YaHei UI", 9))
