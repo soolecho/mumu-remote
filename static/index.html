@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>MuMu 远控</title>
+<style>
+  * { box-sizing:border-box; margin:0; padding:0; -webkit-tap-highlight-color:transparent; }
+  html,body { height:100%; }
+  body { background:#0f1012; color:#e8e8e8; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+         display:flex; flex-direction:column; overflow:hidden; }
+
+  /* 顶部状态条：大字 + 颜色，一眼看清 */
+  #statusbar { flex:none; padding:12px 14px; background:#2a2a2e; border-bottom:1px solid #3a3a3e;
+               display:flex; align-items:center; gap:10px; font-size:16px; font-weight:700; }
+  #statusbar .dot { width:12px; height:12px; border-radius:50%; background:#888; flex:none; }
+  #statusbar.s-ok      { background:#123a24; color:#7ff0a8; }
+  #statusbar.s-ok .dot { background:#4ade80; }
+  #statusbar.s-busy    { background:#3a3212; color:#f5d76e; }
+  #statusbar.s-busy .dot{ background:#facc15; }
+  #statusbar.s-err     { background:#3a1616; color:#ff9b9b; }
+  #statusbar.s-err .dot{ background:#f87171; }
+  #statusbar .spacer { flex:1; }
+  #statusbar .mini { font-size:12px; font-weight:400; opacity:.75; padding:6px 10px;
+                     border:1px solid currentColor; border-radius:6px; }
+
+  /* 连接设置区：实例 + 口令 + 连接 全挤在一行，给画面腾高度 */
+  #setup { flex:none; padding:8px 10px; background:#191a1d; border-bottom:1px solid #2a2a2e; }
+  #setup .row { display:flex; gap:6px; align-items:center; }
+  select,input,button { background:#2b2b30; color:#eee; border:1px solid #45454b; border-radius:9px;
+                        padding:11px 8px; font-size:14px; }
+  #instance { flex:1; min-width:0; }
+  #token-row { flex:1.1; min-width:0; }
+  #token { width:100%; }
+  #connect { flex:none; width:72px; background:#2563eb; border-color:#2563eb; color:#fff;
+             font-weight:700; font-size:15px; }
+  #connect:active { background:#1d4ed8; }
+
+  /* 画面区 */
+  #stage { flex:1; position:relative; display:flex; align-items:center; justify-content:center;
+           overflow:hidden; background:#0a0a0c; }
+  #screen { max-width:100%; max-height:100%; object-fit:contain; touch-action:none; }
+  #hint { position:absolute; text-align:center; padding:24px; color:#888; line-height:1.8; }
+  #hint .big { font-size:42px; margin-bottom:10px; }
+  #hint .lead { font-size:17px; color:#bbb; }
+  #hint .sub { font-size:13px; }
+  #hint.err .lead { color:#ff9b9b; }
+
+  /* 底部工具条 */
+  #tools { flex:none; display:flex; gap:8px; padding:10px; background:#191a1d; border-top:1px solid #2a2a2e; }
+  #tools button { flex:1; padding:12px 4px; }
+  #kb { flex:none; display:none; gap:8px; padding:10px; background:#222; }
+  #kb input { flex:1; }
+  #kb button { flex:none; }
+</style>
+</head>
+<body>
+<div id="statusbar">
+  <span class="dot"></span>
+  <span id="status-text">未连接</span>
+  <span class="spacer"></span>
+  <button class="mini" id="btn-disconn" style="display:none">断开</button>
+</div>
+
+<div id="setup">
+  <div class="row">
+    <select id="instance"></select>
+    <span id="token-row"><input id="token" type="text" placeholder="口令" autocomplete="off"></span>
+    <button id="connect">连接</button>
+  </div>
+</div>
+
+<div id="stage">
+  <div id="hint">
+    <div class="big">📱</div>
+    <div class="lead">选择实例，填口令，点【连接】</div>
+    <div class="sub">连上后这里会显示模拟器画面</div>
+  </div>
+  <img id="screen" style="display:none" alt="screen">
+</div>
+
+<div id="tools">
+  <button id="btn-kb">键盘</button>
+  <button id="btn-back">返回</button>
+  <button id="btn-home">Home</button>
+  <button id="btn-reconnect">重连</button>
+</div>
+
+<div id="kb">
+  <input id="text" placeholder="输入文字（含中文）后点发送">
+  <button id="send">发送</button>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const screen=$('screen'), stage=$('stage'), statusEl=$('statusbar'), statusText=$('status-text');
+const hint=$('hint'), setup=$('setup');
+let ws=null, connected=false, authRequired=true;
+
+// 记住口令与上次选的实例，避免每次手输
+try {
+  const savedToken = localStorage.getItem('mumu_token');
+  if (savedToken) $('token').value = savedToken;
+} catch(e) {}
+
+function setStatus(text, cls){
+  statusText.textContent = text;
+  statusEl.className = cls || '';
+}
+function showHint(lead, sub, isErr){
+  hint.className = isErr ? 'err' : '';
+  hint.innerHTML = '<div class="big">'+(isErr?'⚠️':'📱')+'</div>'+
+                   '<div class="lead">'+lead+'</div>'+
+                   '<div class="sub">'+(sub||'')+'</div>';
+  hint.style.display='block';
+  screen.style.display='none';
+}
+
+// 拉取实例列表（带明确失败提示）
+fetch('/api/instances').then(r=>{
+  if(!r.ok) throw new Error('HTTP '+r.status);
+  return r.json();
+}).then(d=>{
+  authRequired = !!d.auth_required;
+  // 服务端免口令时：隐藏口令行和提示，手机端一点就连
+  if(!authRequired){
+    $('token-row').style.display='none';   // 免口令：整个口令框藏起来，只剩实例+连接
+  }
+  const sel=$('instance');
+  sel.innerHTML='';
+  const ports=Object.entries(d.instances);
+  if(!ports.length){ showHint('没有可用的实例','请先在电脑端配置界面启用至少一个实例',true); return; }
+  for (const [port,name] of ports) {
+    const o=document.createElement('option'); o.value=port; o.textContent=name+' ('+port+')';
+    sel.appendChild(o);
+  }
+  const savedPort=localStorage.getItem('mumu_port');
+  if(savedPort && d.instances[savedPort]) sel.value=savedPort;
+}).catch(e=>{
+  showHint('无法连接到服务','请确认用 http://电脑IP:8000 打开本页，不要直接双击 index.html 文件',true);
+  setStatus('加载失败','s-err');
+});
+
+function connect(){
+  const port=$('instance').value;
+  const token=$('token').value.trim();
+  if (!port) { setStatus('请先选择实例','s-err'); return; }
+  if (authRequired && !token) { setStatus('请先填写访问口令','s-err'); $('token').focus(); return; }
+  try {
+    localStorage.setItem('mumu_token', token);
+    localStorage.setItem('mumu_port', port);
+  } catch(e) {}
+
+  if (ws) { try{ ws.onclose=null; ws.close(); }catch(e){} ws=null; }
+  connected=false;
+  const proto=location.protocol==='https:'?'wss:':'ws:';
+  setStatus('正在连接 '+port+' …','s-busy');
+  ws=new WebSocket(`${proto}//${location.host}/ws/${port}`);
+  ws.binaryType='arraybuffer';
+
+  ws.onopen=()=>{
+    setStatus('验证口令中…','s-busy');
+    ws.send(JSON.stringify({token:token}));
+  };
+  ws.onmessage=(e)=>{
+    if (typeof e.data==='string') {
+      let m; try{ m=JSON.parse(e.data); }catch(err){ return; }
+      if (m.type==='ready') {
+        connected=true;
+        screen.style.display='block'; hint.style.display='none';
+        setup.style.display='none'; $('btn-disconn').style.display='';
+        setStatus('已连接 · '+m.name+' ('+m.width+'×'+m.height+')','s-ok');
+      } else if (m.type==='error') {
+        setStatus('错误：'+m.msg,'s-err');
+        showHint(m.msg,'检查口令是否与被控端一致（注意大小写）',true);
+      }
+      return;
+    }
+    const blob=new Blob([e.data],{type:'image/jpeg'});
+    const url=URL.createObjectURL(blob);
+    const old=screen.src;
+    screen.src=url;
+    if (old) URL.revokeObjectURL(old);
+  };
+  ws.onclose=()=>{
+    connected=false;
+    setup.style.display=''; $('btn-disconn').style.display='none';
+    setStatus('已断开','s-err');
+    showHint('连接已断开','点【重连】或检查电脑端服务是否还在运行',true);
+  };
+  ws.onerror=()=>{
+    setStatus('连接失败','s-err');
+    showHint('连接失败','确认电脑 IP 和端口 8000 正确，且服务正在运行',true);
+  };
+}
+
+function disconnect(){
+  if(ws){ try{ ws.close(); }catch(e){} ws=null; }
+  connected=false;
+  setup.style.display=''; $('btn-disconn').style.display='none';
+  setStatus('未连接','');
+  showHint('已断开连接','选择实例后可重新连接',false);
+}
+
+function send(obj){ if (connected && ws && ws.readyState===1) ws.send(JSON.stringify(obj)); }
+
+// 坐标换算：画面显示区域 -> 归一化 0-1000
+function norm(clientX, clientY){
+  const r=screen.getBoundingClientRect();
+  let x=(clientX-r.left)/r.width*1000;
+  let y=(clientY-r.top)/r.height*1000;
+  return [Math.max(0,Math.min(1000,x)), Math.max(0,Math.min(1000,y))];
+}
+
+let startPt=null, moved=false;
+screen.addEventListener('touchstart',e=>{
+  e.preventDefault();
+  if (e.touches.length!==1) { startPt=null; return; }
+  const t=e.touches[0]; startPt=norm(t.clientX,t.clientY); moved=false;
+},{passive:false});
+screen.addEventListener('touchmove',e=>{
+  e.preventDefault();
+  if (!startPt || e.touches.length!==1) return;
+  const t=e.touches[0]; const [x,y]=norm(t.clientX,t.clientY);
+  if (Math.abs(x-startPt[0])>8 || Math.abs(y-startPt[1])>8) moved=true;
+  send({type:'swipe',x1:startPt[0],y1:startPt[1],x2:x,y2:y,duration:200});
+  startPt=[x,y];
+},{passive:false});
+screen.addEventListener('touchend',e=>{
+  e.preventDefault();
+  if (startPt && !moved) send({type:'tap',x:startPt[0],y:startPt[1]});
+  startPt=null;
+},{passive:false});
+
+let mdown=false;
+screen.addEventListener('mousedown',e=>{ mdown=true; startPt=norm(e.clientX,e.clientY); moved=false; });
+screen.addEventListener('mousemove',e=>{
+  if(!mdown||!startPt) return;
+  const [x,y]=norm(e.clientX,e.clientY); moved=true;
+  send({type:'swipe',x1:startPt[0],y1:startPt[1],x2:x,y2:y,duration:200}); startPt=[x,y];
+});
+screen.addEventListener('mouseup',()=>{ if(startPt&&!moved) send({type:'tap',x:startPt[0],y:startPt[1]}); mdown=false; });
+
+$('connect').onclick=connect;
+$('btn-reconnect').onclick=connect;
+$('btn-disconn').onclick=disconnect;
+$('btn-back').onclick=()=>send({type:'key',code:'4'});
+$('btn-home').onclick=()=>send({type:'key',code:'3'});
+$('btn-kb').onclick=()=>{ const k=$('kb'); k.style.display=k.style.display==='none'?'flex':'none'; };
+$('send').onclick=()=>{ const v=$('text').value; if(v){ send({type:'text',value:v}); $('text').value=''; } };
+$('token').addEventListener('keydown',e=>{ if(e.key==='Enter') connect(); });
+</script>
+</body>
+</html>

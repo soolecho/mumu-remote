@@ -1,0 +1,22 @@
+{
+  "ADB_PATH": "C:\\Program Files\\Netease\\MuMu\\nx_main\\adb.exe",
+  "MUMU_INSTALL_PATH": "C:\\Program Files\\Netease\\MuMu",
+  "INSTANCES": {
+    "16384": "实例0",
+    "16416": "实例1"
+  },
+  "INSTANCE_INDEX": {
+    "16384": 0,
+    "16416": 1
+  },
+  "CAPTURE_METHOD": "mumu_shm",
+  "TARGET_WIDTH": 720,
+  "TARGET_HEIGHT": 1280,
+  "FPS": 15,
+  "JPEG_QUALITY": 72,
+  "INPUT_METHOD": "adb",
+  "ADBKEYBOARD_ENABLED": true,
+  "HOST": "0.0.0.0",
+  "PORT": 8000,
+  "ACCESS_TOKEN": "change-me-123"
+}
