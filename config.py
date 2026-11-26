@@ -26,6 +26,18 @@ INSTANCE_INDEX = {
     "16448": 2,
 }
 
+# ===== 每个实例要抓/控的 Android display ID（关键！）=====
+# MuMu 15 的同一个实例里可能有多个 display：
+#   display 0 = 模拟器桌面(launcher)
+#   display 2 = 用户实际运行的 App（多开器里打开的那个窗口）
+# 写死 0 就会永远抓到桌面。用 GUI 的【检测 Display】按钮看每个 display 是什么。
+# 也可以用 adb shell dumpsys display 查所有 display id。
+DISPLAY_IDS = {
+    "16384": 2,
+    "16416": 2,
+    "16448": 2,
+}
+
 # MuMu 安装目录（共享内存截图用来定位 external_renderer_ipc.dll）
 # 留空则自动从注册表 / ADB 路径 / 常见安装目录推断。
 MUMU_INSTALL_PATH = r"C:\Program Files\Netease\MuMu"

@@ -34,6 +34,14 @@ class CaptureState:
 _states: dict[str, CaptureState] = {}
 
 
+def _display_id(port: str) -> int:
+    """取实例对应的 Android display id，默认 0（模拟器桌面）。"""
+    try:
+        return int(getattr(config, "DISPLAY_IDS", {}).get(port, 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _adb(*args: str) -> bytes:
     cmd = [config.ADB_PATH, "-s", f"127.0.0.1:{args[0]}", *args[1:]]
     return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -42,7 +50,8 @@ def _adb(*args: str) -> bytes:
 
 def _grab_adb(port: str) -> bytes:
     """adb exec-out screencap -p -> JPEG"""
-    raw = _adb(port, "exec-out", "screencap", "-p")
+    # -d 指定 display，否则 MuMu 15 上抓到的是桌面而不是业务 App
+    raw = _adb(port, "exec-out", "screencap", "-d", str(_display_id(port)), "-p")
     # MuMu 15 会在 stdout 前面打一段 "[Warning] Multiple displays..." 文本，
     # 必须从 PNG 魔数开始截，否则 PIL 打开失败。同时处理 Windows 的 CRLF 转换。
     magic = raw.find(b"\x89PNG\r\n\x1a\n")
@@ -71,7 +80,7 @@ def _grab_shm(port: str) -> bytes:
         if idx is None:
             idx = list(config.INSTANCES).index(port)
         try:
-            cap = _SHM_CLASS(int(idx))
+            cap = _SHM_CLASS(int(idx), display_id=_display_id(port))
             _SHM[port] = cap
         except Exception as e:
             print(f"[capture] 共享内存初始化失败，回退 ADB: {e}")

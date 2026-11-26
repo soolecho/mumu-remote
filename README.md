@@ -41,7 +41,7 @@ python gui.py
 | 区域 | 要填什么 |
 |---|---|
 | ① ADB 工具 | 点【自动检测】找 adb.exe；再点【连接 MuMu 常用端口】→【扫描在线实例】 |
-| ② 实例列表 | 每个实例的端口、显示名、**实例序号**（0=主实例，1=第一个多开）、是否启用 |
+| ② 实例列表 | 每个实例的端口、显示名、**实例序号**（0=主实例，1=第一个多开）、**显示ID**、是否启用。点【检测 Display】自动填推荐值 |
 | ③ 画面 | 捕获方式、分辨率、帧率、JPEG 质量。选共享内存后帧率可拉到 30 |
 | ④ 输入 | 一般保持默认；要中文就装 ADBKeyboard 并勾上 |
 | ⑤ 服务 | 监听地址 `0.0.0.0`、端口 8000、访问口令（点随机生成） |
@@ -100,6 +100,7 @@ python -m uvicorn server:app --host 0.0.0.0 --port 8000
 - DLL 路径要匹配版本。MuMu 15 是 `nx_device\15.0\shell\sdk\external_renderer_ipc.dll`（或 `nx_main\sdk\`），12.5+ 是 `nx_device\12.0\shell\sdk\`，代码已按新到旧自动探测。
 - **分辨率必须填模拟器原生值**（本机 720×1280）。缩放一轮 +20ms，会把帧率从 13 压到 8。用 `adb shell wm size` 查真实值。
 - 实例要在跑；`实例序号` 填错会抓到别的实例或连不上（0=主实例）。
+- **画面一直是模拟器桌面？改【显示ID】**。MuMu 15 同一个实例里其实有多个 display：`0` 是桌面(launcher)，`2` 通常才是你打开的业务 App。抓帧和输入都按这个 ID 走，写死 0 就会永远看到桌面、点击也打在桌面上。点【检测 Display】会自动列出每个 display 上的前台 App 并填入推荐值；也可以 `adb -s 127.0.0.1:PORT shell dumpsys display` 自己查。
 - `nemu_connect` 的第一个参数必须是 `c_wchar_p`（宽字符路径），传 bytes 会返回 handle=0。
 - 初始化失败时捕获层会**自动回退到 ADB 截图**，不会黑屏，只是极慢。
 - 实现参考 `NakanoSanku/msc` 的 MuMuCap（MIT），改成只依赖 Pillow。

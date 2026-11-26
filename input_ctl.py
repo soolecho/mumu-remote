@@ -8,6 +8,19 @@ import config
 _last_swipe = 0.0
 
 
+def _display_id(port: str) -> int:
+    """实例对应的 Android display，与抓帧保持一致，否则点不到画面上的元素。"""
+    try:
+        return int(getattr(config, "DISPLAY_IDS", {}).get(port, 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _input(port: str, *args: str) -> str:
+    """input 命令带 -d <display_id>（Android 10+ 支持）。"""
+    return _adb(port, "shell", "input", "-d", str(_display_id(port)), *args)
+
+
 def _adb(port: str, *args: str) -> str:
     cmd = [config.ADB_PATH, "-s", f"127.0.0.1:{port}", *args]
     r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
@@ -23,7 +36,7 @@ def _map(x: float, y: float) -> tuple[int, int]:
 
 def tap(port: str, x: float, y: float):
     px, py = _map(x, y)
-    _adb(port, "shell", "input", "tap", str(px), str(py))
+    _input(port, "tap", str(px), str(py))
 
 
 def swipe(port: str, x1: float, y1: float, x2: float, y2: float, duration: int = 250):
@@ -35,8 +48,8 @@ def swipe(port: str, x1: float, y1: float, x2: float, y2: float, duration: int =
     _last_swipe = now
     a = _map(x1, y1)
     b = _map(x2, y2)
-    _adb(port, "shell", "input", "swipe", str(a[0]), str(a[1]),
-         str(b[0]), str(b[1]), str(max(50, min(2000, duration))))
+    _input(port, "swipe", str(a[0]), str(a[1]),
+           str(b[0]), str(b[1]), str(max(50, min(2000, duration))))
 
 
 def text(port: str, value: str):
@@ -47,12 +60,12 @@ def text(port: str, value: str):
     else:
         # 原生 input text 只支持 ASCII，空格要转成 %s
         safe = value.replace(" ", "%s")
-        _adb(port, "shell", "input", "text", safe)
+        _input(port, "text", safe)
 
 
 def key(port: str, code: str):
     """keyevent：BACK=4 HOME=3 电源=26 音量+=24 音量-=25"""
-    _adb(port, "shell", "input", "keyevent", code)
+    _input(port, "keyevent", code)
 
 
 def shell(port: str, command: str):

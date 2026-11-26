@@ -115,12 +115,13 @@ class MainWindow(QMainWindow):
         v = QVBoxLayout(g_inst)
         v.setContentsMargins(8, 4, 8, 6)
         v.setSpacing(4)
-        self.tbl = QTableWidget(0, 4)
-        self.tbl.setHorizontalHeaderLabels(["ADB 端口", "显示名称", "序号", "启用"])
+        self.tbl = QTableWidget(0, 5)
+        self.tbl.setHorizontalHeaderLabels(["ADB 端口", "显示名称", "序号", "显示ID", "启用"])
         self.tbl.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.tbl.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.tbl.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.tbl.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         self.tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.tbl.setEditTriggers(
             QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.SelectedClicked
@@ -128,12 +129,17 @@ class MainWindow(QMainWindow):
         self.tbl.setMinimumHeight(100)
         v.addWidget(self.tbl)
         row = QHBoxLayout()
-        for text, fn in (("添加实例", self.add_instance), ("删除选中", self.del_instance)):
+        for text, fn in (("添加实例", self.add_instance), ("删除选中", self.del_instance),
+                         ("检测 Display", self.detect_displays)):
             b = QPushButton(text)
             b.clicked.connect(fn)
             row.addWidget(b)
         row.addStretch(1)
         v.addLayout(row)
+        self.lb_display_tip = QLabel("显示ID：0=桌面，2=App（MuMu 15 实测）。抓到桌面就改这里。")
+        self.lb_display_tip.setWordWrap(True)
+        self.lb_display_tip.setStyleSheet("color:#f5d76e;")
+        v.addWidget(self.lb_display_tip)
         left.addWidget(g_inst, 1)
 
         # ③ 画面
@@ -286,24 +292,28 @@ class MainWindow(QMainWindow):
         self.tbl.removeRow(row)
         self._log("已删除选中实例，记得点【保存配置】")
 
-    def _add_row(self, port: str, name: str, index: int = 0, enabled: bool = True):
+    def _add_row(self, port: str, name: str, index: int = 0, enabled: bool = True,
+                 display_id: int = 2):
         r = self.tbl.rowCount()
         self.tbl.insertRow(r)
         self.tbl.setItem(r, 0, QTableWidgetItem(str(port)))
         self.tbl.setItem(r, 1, QTableWidgetItem(str(name)))
         self.tbl.setItem(r, 2, QTableWidgetItem(str(index)))
+        self.tbl.setItem(r, 3, QTableWidgetItem(str(display_id)))
         ck = QTableWidgetItem()
         ck.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
         ck.setCheckState(Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked)
-        self.tbl.setItem(r, 3, ck)
+        self.tbl.setItem(r, 4, ck)
 
     def _load_ui(self):
         self.ed_adb.setText(config.ADB_PATH)
         self.ed_mumu.setText(getattr(config, "MUMU_INSTALL_PATH", ""))
         self.tbl.setRowCount(0)
         indexes = getattr(config, "INSTANCE_INDEX", {})
+        displays = getattr(config, "DISPLAY_IDS", {})
         for port, name in config.INSTANCES.items():
-            self._add_row(str(port), str(name), indexes.get(port, 0))
+            self._add_row(str(port), str(name), indexes.get(port, 0),
+                          display_id=displays.get(port, 2))
         idx = self.cb_capture.findData(config.CAPTURE_METHOD)
         self.cb_capture.setCurrentIndex(idx if idx >= 0 else 0)
         self.sp_w.setValue(config.TARGET_WIDTH)
@@ -324,11 +334,13 @@ class MainWindow(QMainWindow):
     def _collect(self) -> dict:
         instances = {}
         indexes = {}
+        displays = {}
         for r in range(self.tbl.rowCount()):
             p = self.tbl.item(r, 0)
             n = self.tbl.item(r, 1)
             ix = self.tbl.item(r, 2)
-            e = self.tbl.item(r, 3)
+            di = self.tbl.item(r, 3)
+            e = self.tbl.item(r, 4)
             port = p.text().strip() if p else ""
             name = n.text().strip() if n and n.text().strip() else f"实例{port}"
             enabled = (e.checkState() == Qt.CheckState.Checked) if e else True
@@ -338,11 +350,16 @@ class MainWindow(QMainWindow):
                     indexes[port] = int(ix.text().strip()) if ix else 0
                 except ValueError:
                     indexes[port] = 0
+                try:
+                    displays[port] = int(di.text().strip()) if di else 0
+                except ValueError:
+                    displays[port] = 0
         return {
             "ADB_PATH": self.ed_adb.text().strip(),
             "MUMU_INSTALL_PATH": self.ed_mumu.text().strip(),
             "INSTANCES": instances,
             "INSTANCE_INDEX": indexes,
+            "DISPLAY_IDS": displays,
             "CAPTURE_METHOD": self.cb_capture.currentData(),
             "TARGET_WIDTH": self.sp_w.value(),
             "TARGET_HEIGHT": self.sp_h.value(),
@@ -508,6 +525,79 @@ class MainWindow(QMainWindow):
             self._log("设备列表：" + body.replace("\n", " | "))
         except Exception as e:
             self._log(f"测试失败：{e}")
+
+    def detect_displays(self):
+        """列出每个在线实例的所有 display，并推荐非桌面的那个。
+
+        MuMu 15 里同一个实例有多个 display：0 通常是桌面(launcher)，
+        2 往往是用户打开的业务 App。抓住这个规律自动填，省得手试。
+        """
+        ports = []
+        for r in range(self.tbl.rowCount()):
+            it = self.tbl.item(r, 0)
+            if it and it.text().strip():
+                ports.append(it.text().strip())
+        if not ports:
+            QMessageBox.information(self, "没有实例", "请先在实例列表里添加 ADB 端口")
+            return
+
+        lines = ["每个实例的 display 列表（推荐值已自动填入表格，记得点【保存配置】）：", ""]
+        filled = 0
+        for port in ports:
+            # 用 dumpsys 找出每个 display 上的前台 App
+            try:
+                r = self._adb("-s", f"127.0.0.1:{port}", "shell", "dumpsys", "activity", "activities")
+                acts = []
+                for line in r.stdout.splitlines():
+                    if "topResumedActivity" in line:
+                        m = re.search(r"u0\s+([\w.]+)/", line)
+                        if m:
+                            acts.append(m.group(1))
+            except Exception as e:
+                acts = []
+                self._log(f"{port} 查询 activity 失败：{e}")
+
+            # 从 display 管理器拿全部 display id
+            try:
+                r = self._adb("-s", f"127.0.0.1:{port}", "shell", "dumpsys", "display")
+                ids = sorted(set(int(x) for x in re.findall(r"displayId=(\d+)", r.stdout)))
+            except Exception:
+                ids = [0, 2]
+            if not ids:
+                ids = [0, 2]
+
+            desc = []
+            recommend = None
+            for d in ids:
+                pkg = acts[ids.index(d)] if d < len(acts) else ""
+                if "lawnchair" in pkg.lower() or "launcher" in pkg.lower():
+                    tag = "桌面"
+                elif pkg:
+                    tag = f"App: {pkg.split('.')[-1]}"
+                    if recommend is None:
+                        recommend = d
+                else:
+                    tag = "未知"
+                desc.append(f"{d}={tag}")
+            lines.append(f"实例 {port}：" + "，".join(desc))
+
+            # 自动把推荐的 display 填进表格
+            if recommend is not None:
+                for row in range(self.tbl.rowCount()):
+                    it = self.tbl.item(row, 0)
+                    if it and it.text().strip() == port:
+                        cell = self.tbl.item(row, 3)
+                        if cell is None:
+                            cell = QTableWidgetItem()
+                            self.tbl.setItem(row, 3, cell)
+                        cell.setText(str(recommend))
+                        filled += 1
+                        break
+        if filled:
+            lines.append("")
+            lines.append(f"已自动填入推荐值（{filled} 个实例），点【保存配置】生效。")
+        self._log("Display 检测完成，已填入推荐值" if filled else "Display 检测完成，未找到可推荐的 App display")
+        QMessageBox.information(self, "Display 检测结果", "\n".join(lines))
 
     # ---------- 托盘 / 单实例 ----------
     def _init_tray(self):

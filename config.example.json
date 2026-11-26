@@ -9,6 +9,10 @@
     "16384": 0,
     "16416": 1
   },
+  "DISPLAY_IDS": {
+    "16384": 2,
+    "16416": 2
+  },
   "CAPTURE_METHOD": "mumu_shm",
   "TARGET_WIDTH": 720,
   "TARGET_HEIGHT": 1280,
