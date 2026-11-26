@@ -15,17 +15,20 @@ import random
 from datetime import datetime
 
 from PyQt6.QtCore import QProcess, QProcessEnvironment, Qt
-from PyQt6.QtGui import QFont, QIcon
+from PyQt6.QtGui import QAction, QFont, QIcon
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog,
     QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-    QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea,
-    QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
+    QSpinBox, QSystemTrayIcon, QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QWidget,
 )
 
 import config
 
 BASE = os.path.dirname(os.path.abspath(__file__))
+SINGLE_INSTANCE_KEY = "mumu_remote_gui_single_instance"
 
 
 class MainWindow(QMainWindow):
@@ -50,7 +53,10 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._load_ui()
-        self._log("就绪。改完配置点【保存配置】，再点【启动服务】。")
+        self.tray = None
+        self._tray_tip_shown = False
+        self._init_tray()
+        self._log("就绪。改完配置点【保存配置】，再点【启动服务】。关闭窗口会缩到托盘继续运行。")
 
     # ---------- 界面 ----------
     def _build_ui(self):
@@ -169,9 +175,9 @@ class MainWindow(QMainWindow):
         form.addRow("", row)
         right.addWidget(g_video)
 
-        # ④ 输入 + ⑤ 服务 合并成一组，进一步压缩高度
-        g_misc = QGroupBox("④ 输入　⑤ 服务与访问")
-        form = QFormLayout(g_misc)
+        # ④ 输入
+        g_input = QGroupBox("④ 输入与监听")
+        form = QFormLayout(g_input)
         form.setContentsMargins(8, 4, 8, 6)
         form.setSpacing(4)
         self.cb_input = QComboBox()
@@ -190,22 +196,52 @@ class MainWindow(QMainWindow):
         row.addWidget(self.sp_port)
         row.addStretch(1)
         form.addRow("监听地址", row)
+        right.addWidget(g_input)
+
+        # ⑤ 口令与手机地址：单独成组，一眼能看到、能直接改
+        g_access = QGroupBox("⑤ 访问口令与手机地址（手机端用）")
+        v = QVBoxLayout(g_access)
+        v.setContentsMargins(8, 6, 8, 6)
+        v.setSpacing(6)
         row = QHBoxLayout()
+        row.addWidget(QLabel("访问口令"))
         self.ed_token = QLineEdit()
         self.ed_token.setEchoMode(QLineEdit.EchoMode.Normal)
-        self.ed_token.setPlaceholderText("留空 = 不使用口令（仅自己网络时）")
+        self.ed_token.setPlaceholderText("手动输入任意口令；留空 = 免口令")
+        self.ed_token.setMinimumHeight(30)
+        self.ed_token.textChanged.connect(self._update_token_state)
+        row.addWidget(self.ed_token, 1)
         b = QPushButton("随机")
+        b.setToolTip("生成随机口令并立即保存到配置文件")
         b.clicked.connect(self.random_token)
         row.addWidget(b)
-        b = QPushButton("隐藏")
-        b.clicked.connect(self.toggle_token)
+        b = QPushButton("免口令")
+        b.setToolTip("清空口令，手机端不用输入即可连接，立即保存")
+        b.clicked.connect(self.set_no_auth)
         row.addWidget(b)
-        form.addRow("访问口令", row)
+        self.btn_token_eye = QPushButton("隐藏")
+        self.btn_token_eye.setToolTip("切换口令明文/密文显示")
+        self.btn_token_eye.clicked.connect(self.toggle_token)
+        row.addWidget(self.btn_token_eye)
+        v.addLayout(row)
+
+        self.lb_auth_state = QLabel()
+        self.lb_auth_state.setWordWrap(True)
+        v.addWidget(self.lb_auth_state)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("手机访问"))
         self.lb_url = QLabel()
         self.lb_url.setWordWrap(True)
-        form.addRow("手机访问", self.lb_url)
-        form.addRow("", QLabel("口令可手动输入任意字符串；留空则手机端免口令直连"))
-        right.addWidget(g_misc, 1)
+        self.lb_url.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.lb_url.setStyleSheet("font-weight:bold; color:#7dd3fc;")
+        row.addWidget(self.lb_url, 1)
+        b = QPushButton("复制")
+        b.setToolTip("复制手机访问地址到剪贴板")
+        b.clicked.connect(self.copy_url)
+        row.addWidget(b)
+        v.addLayout(row)
+        right.addWidget(g_access, 1)
 
         # 底部：运行控制条 + 日志（固定高度，不再需要滚动整页）
         g_run = QGroupBox("⑥ 运行")
@@ -281,7 +317,9 @@ class MainWindow(QMainWindow):
         self.sp_port.setValue(config.PORT)
         self.ed_token.setText(config.ACCESS_TOKEN)
         self.ed_token.setEchoMode(QLineEdit.EchoMode.Normal)  # 明文显示，方便看到/手动改
+        self.btn_token_eye.setText("隐藏")
         self._update_url()
+        self._update_token_state()
 
     def _collect(self) -> dict:
         instances = {}
@@ -471,6 +509,78 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._log(f"测试失败：{e}")
 
+    # ---------- 托盘 / 单实例 ----------
+    def _init_tray(self):
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            self._log("当前系统不支持托盘，关闭窗口将直接退出（服务也会停止）")
+            return
+        self.tray = QSystemTrayIcon(self.windowIcon(), self)
+        self.tray.setToolTip("MuMu 远控 · 被控端")
+        menu = QMenu()
+        self.act_show = QAction("显示 / 隐藏界面", self)
+        self.act_show.triggered.connect(self.toggle_window)
+        menu.addAction(self.act_show)
+        self.act_service = QAction("启动服务", self)
+        self.act_service.triggered.connect(self.toggle_service_from_tray)
+        menu.addAction(self.act_service)
+        menu.addSeparator()
+        act_quit = QAction("退出（同时停止服务）", self)
+        act_quit.triggered.connect(self.quit_app)
+        menu.addAction(act_quit)
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(self._on_tray_activated)
+        self.tray.show()
+        self._sync_tray_menu()
+
+    def _on_tray_activated(self, reason):
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger,
+                      QSystemTrayIcon.ActivationReason.DoubleClick):
+            self.show_window()
+
+    def _sync_tray_menu(self):
+        if not hasattr(self, "act_service"):
+            return
+        running = self.proc.state() != QProcess.ProcessState.NotRunning
+        self.act_service.setText("停止服务" if running else "启动服务")
+
+    def toggle_service_from_tray(self):
+        if self.proc.state() != QProcess.ProcessState.NotRunning:
+            self.stop_service()
+        else:
+            self.start_service()
+
+    def show_window(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def toggle_window(self):
+        if self.isVisible():
+            self.hide()
+        else:
+            self.show_window()
+
+    def closeEvent(self, event):
+        # 点 X 不退出，缩到托盘，服务继续在后台跑
+        if self.tray is not None and self.tray.isVisible():
+            event.ignore()
+            self.hide()
+            if not self._tray_tip_shown:
+                self.tray.showMessage(
+                    "MuMu 远控", "已缩到托盘，服务继续运行。双击托盘图标可重新打开界面。",
+                    QSystemTrayIcon.MessageIcon.Information, 4000,
+                )
+                self._tray_tip_shown = True
+        else:
+            self.quit_app()
+            event.ignore()
+
+    def quit_app(self):
+        self.stop_service()
+        if self.tray is not None:
+            self.tray.hide()
+        QApplication.quit()
+
     # ---------- 服务控制 ----------
     @staticmethod
     def _lan_ips():
@@ -504,17 +614,49 @@ class MainWindow(QMainWindow):
         chars = string.ascii_letters + string.digits
         self.ed_token.setText("".join(random.SystemRandom().choice(chars) for _ in range(16)))
         self.ed_token.setEchoMode(QLineEdit.EchoMode.Normal)
-        self._log("已生成随机口令，记得点【保存配置】。")
+        self.btn_token_eye.setText("隐藏")
+        ok = self.save_config(silent=True)
+        self._log("已生成随机口令并" + ("保存到配置文件。" if ok else "填入输入框，但配置尚未保存。"))
+        if ok:
+            self._warn_restart_if_running()
+
+    def set_no_auth(self):
+        """一键免口令：清空口令并立即写配置，手机端无需输入。"""
+        self.ed_token.setText("")
+        self.ed_token.setEchoMode(QLineEdit.EchoMode.Normal)
+        self.btn_token_eye.setText("隐藏")
+        ok = self.save_config(silent=True)
+        self._log("已切换为免口令并" + ("保存到配置文件。" if ok else "填入输入框，但配置尚未保存。"))
+        if ok:
+            self._warn_restart_if_running()
+
+    def _warn_restart_if_running(self):
+        if self.proc.state() != QProcess.ProcessState.NotRunning:
+            self._log("服务正在运行，需【停止服务】再【启动服务】后新口令才生效。")
+
+    def _update_token_state(self):
+        if not hasattr(self, "lb_auth_state"):
+            return
+        if self.ed_token.text().strip():
+            self.lb_auth_state.setText("当前状态：需要口令 —— 手机端必须输入上面这个口令才能连")
+            self.lb_auth_state.setStyleSheet("color:#f5d76e;")
+        else:
+            self.lb_auth_state.setText("当前状态：免口令 —— 手机端不用输入，选好实例直接点连接")
+            self.lb_auth_state.setStyleSheet("color:#7ff0a8;")
+
+    def copy_url(self):
+        text = self.lb_url.text().split("←")[0].strip()
+        if not text:
+            return
+        QApplication.clipboard().setText(text)
+        self._log("手机地址已复制：" + text)
 
     def toggle_token(self):
         is_normal = self.ed_token.echoMode() == QLineEdit.EchoMode.Normal
         self.ed_token.setEchoMode(
             QLineEdit.EchoMode.Password if is_normal else QLineEdit.EchoMode.Normal
         )
-        # 更新按钮文字：当前明文时按钮显示"隐藏"
-        for b in self.findChildren(QPushButton):
-            if b.text() in ("隐藏", "显示"):
-                b.setText("显示" if is_normal else "隐藏")
+        self.btn_token_eye.setText("显示" if is_normal else "隐藏")
 
     def _set_res(self, w: int, h: int):
         self.sp_w.setValue(w)
@@ -537,6 +679,7 @@ class MainWindow(QMainWindow):
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.lb_status.setText(f"服务运行中：http://{host}:{port}")
+        self._sync_tray_menu()
         self._log(f"服务启动中：端口 {port}")
 
     def stop_service(self):
@@ -547,6 +690,7 @@ class MainWindow(QMainWindow):
             self.proc.kill()
             self.proc.waitForFinished(2000)
         self.lb_status.setText("服务已停止")
+        self._sync_tray_menu()
 
     def _on_stdout(self):
         txt = self.proc.readAllStandardOutput().data().decode("utf-8", "ignore")
@@ -562,6 +706,7 @@ class MainWindow(QMainWindow):
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self.lb_status.setText(f"服务未运行（退出码 {code}）")
+        self._sync_tray_menu()
         self._log(f"服务进程退出，退出码 {code}")
 
     def _log(self, text: str):
@@ -571,10 +716,45 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
+
+    # 单实例锁：已有实例在跑时，只通知它弹窗，本进程直接退出
+    probe = QLocalSocket()
+    probe.connectToServer(SINGLE_INSTANCE_KEY)
+    if probe.waitForConnected(300):
+        try:
+            probe.write(b"show")
+            probe.flush()
+            probe.waitForBytesWritten(300)
+        except Exception:
+            pass
+        probe.disconnectFromServer()
+        return 0
+
+    QLocalServer.removeServer(SINGLE_INSTANCE_KEY)
+    server = QLocalServer()
+    if not server.listen(SINGLE_INSTANCE_KEY):
+        server = None  # 极端情况监听失败，不影响主功能
+
     win = MainWindow()
+    if server is not None:
+        def _on_new_connection():
+            while server.hasPendingConnections():
+                conn = server.nextPendingConnection()
+                if conn is not None:
+                    conn.readyRead.connect(lambda c=conn: c.readAll())
+                    conn.disconnected.connect(conn.deleteLater)
+            win.show_window()
+        server.newConnection.connect(_on_new_connection)
+    app._mumu_single_instance_server = server  # 保活，防止被 GC 释放
     win.show()
-    sys.exit(app.exec())
+
+    code = app.exec()
+    if server is not None:
+        server.close()
+        QLocalServer.removeServer(SINGLE_INSTANCE_KEY)
+    return code
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
